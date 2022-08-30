@@ -1,11 +1,16 @@
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <X11/Xlib.h>
+#include <X11/extensions/XInput2.h>
 #include <xcb/xcb.h>
 #include <xcb/xproto.h>
+#include <xcb/xinput.h>
 #include <execinfo.h>
+#include <stdint.h>
 // removeme
 #include <dlfcn.h>
+
+#include <assert.h>
 
 // Red colour
 #define IN_SHIM_XLIB_C
@@ -21,6 +26,8 @@ extern void* (*dlsym_real)(void* handle, const char* symbol);
 static void* xlib_handle = NULL;
 extern void* xcb_handle;
 
+static uint8_t xinput_opcode;
+
 static inline void xlib_setup_reentrant()
 {
     PM();
@@ -28,6 +35,11 @@ static inline void xlib_setup_reentrant()
     if(xlib_handle)
         return;
     xlib_handle = dlopen_real("libX11.so.6", RTLD_NOW);
+}
+
+static inline double fp1616_to_double(xcb_input_fp1616_t v)
+{
+    return v / (double)UINT16_MAX;
 }
 
 // Walk up the stack and see if we are the ones who called the function
@@ -192,21 +204,102 @@ int XDestroyWindow_custom(Display *display, Window w)
 int XNextEvent_custom(Display* display, XEvent* event_return)
 {
     PM();
-    XAnyEvent* e = (XAnyEvent*)event_return;
-    CustomXEvent* ce = (CustomXEvent*)event_return;
 
     xcb_generic_event_t* (*xcb_wait_for_event_real)(xcb_connection_t* c) = dlsym_real(xcb_handle, "xcb_wait_for_event");
     xcb_generic_event_t* evt = xcb_wait_for_event_real(((FakeDisplay*)display)->xcbconn);
-    ce->xcbevt = evt;
+    ((CustomXEvent*)event_return)->xcbevt = evt;
     if(!evt)
         return 1;
 
-    // Event type ids are the same between Xlib and XCB
-    e->type = evt->response_type & ~0x80;
-    e->serial = evt->sequence; // FIXME: Is this correct?
-    // FIXME FIXME FIXME
+    // Event type ids should be the same between Xlib and XCB
+    // It is done like this because it's very easy to make the mistake of casting the wrong event and then wonder why the results are wrong
+    // (It happened to me.)
+    const uint8_t type = ((XAnyEvent*)event_return)->type = evt->response_type & ~0x80;
+    ((XAnyEvent*)event_return)->serial = evt->sequence; // FIXME: Is this correct?
+
     // How on earth do we get this?
     //e->window =
+
+    if(type == XCB_KEY_RELEASE || type == XCB_KEY_PRESS)
+    {
+        // Both event structs are the same in xcb as well
+        xcb_key_press_event_t* xcbe = (xcb_key_press_event_t*)evt;
+        XKeyEvent* ke = (XKeyEvent*)event_return;
+        ke->time = xcbe->time;
+        ke->root = xcbe->root;
+        ke->window = xcbe->event; // ??
+        ke->subwindow = xcbe->child;
+        ke->x = xcbe->event_x;
+        ke->y = xcbe->event_y;
+        ke->x_root = xcbe->root_x;
+        ke->y_root = xcbe->root_y;
+        ke->keycode = xcbe->detail;
+        ke->state = xcbe->state;
+        ke->same_screen = xcbe->same_screen;
+    }
+    else if(type == XCB_BUTTON_RELEASE || type == XCB_BUTTON_PRESS)
+    {
+        xcb_button_press_event_t* xcbe = (xcb_button_press_event_t*)evt;
+        XButtonEvent* ke = (XButtonEvent*)event_return;
+        ke->time = xcbe->time;
+        ke->root = xcbe->root;
+        ke->window = xcbe->event; // ??
+        ke->subwindow = xcbe->child;
+        ke->x = xcbe->event_x;
+        ke->y = xcbe->event_y;
+        ke->x_root = xcbe->root_x;
+        ke->y_root = xcbe->root_y;
+        ke->state = xcbe->state;
+        ke->button = xcbe->detail;
+        ke->same_screen = xcbe->same_screen;
+    }
+    else if(type == XCB_GE_GENERIC)
+    {
+        xcb_ge_generic_event_t* ge = (xcb_ge_generic_event_t*)evt;
+        if(xinput_opcode && ge->extension == xinput_opcode) // FIXME doesn't work
+        {
+            // They all use the same struct
+            // Key and button are different struct definitions but end up being the same
+            if(ge->event_type == XCB_INPUT_KEY_PRESS || ge->event_type == XCB_INPUT_KEY_RELEASE || ge->event_type == XCB_INPUT_BUTTON_PRESS || ge->event_type == XCB_INPUT_BUTTON_RELEASE || ge->event_type == XCB_INPUT_MOTION)
+            {
+                xcb_input_button_press_event_t* xievt = (xcb_input_button_press_event_t*)ge;
+                // FIXME: verify we're not overwriting anything
+                XIDeviceEvent* retevt = (XIDeviceEvent*)event_return;
+
+                retevt->extension = xievt->extension;
+                retevt->evtype = xievt->event_type;
+                retevt->deviceid = xievt->deviceid;
+                retevt->sourceid = xievt->sourceid;
+                retevt->detail = xievt->detail;
+                retevt->root = xievt->root;
+                retevt->event = xievt->event;
+                retevt->child = xievt->child;
+                retevt->root_x = fp1616_to_double(xievt->root_x);
+                retevt->root_y = fp1616_to_double(xievt->root_y);
+                retevt->event_x = fp1616_to_double(xievt->event_x);
+                retevt->event_y = fp1616_to_double(xievt->event_y);
+                retevt->flags = xievt->flags;
+                // mods
+                retevt->mods.base = xievt->mods.base;
+                retevt->mods.latched = xievt->mods.latched;
+                retevt->mods.locked = xievt->mods.locked;
+                retevt->mods.effective = xievt->mods.effective;
+                // group
+                retevt->group.base = xievt->group.base;
+                retevt->group.latched = xievt->group.latched;
+                retevt->group.locked = xievt->group.locked;
+                retevt->group.effective = xievt->group.effective;
+                // FIXME:
+                // buttons, valuators
+            }
+            else
+                printf("UNHANDLED XINPUT EVENT %hhu\n", ge->event_type); // FIXME
+        }
+        else
+           printf("UNHANDLED GENERIC EVENT %hhu ext %d op %hhu\n", type, ge->extension, xinput_opcode);
+    }
+    else
+        printf("UNHANDLED EVENT %d op %hhu\n", type, xinput_opcode);
     return 0;
 }
 
@@ -217,4 +310,120 @@ KeySym XLookupKeysym_custom(XKeyEvent* key_event, int col)
     xcb_keysym_t sym = xcb_key_press_lookup_keysym(((FakeDisplay*)key_event->display)->xcbsyms, (xcb_key_press_event_t*)e->xcbevt, col);
     printf("SYM %d\n", sym);
     return sym;
+}
+
+Pixmap XCreatePixmap_custom(Display* display, Drawable d, unsigned int width, unsigned int height, unsigned int depth)
+{
+    PM();
+    FakeDisplay* f = (FakeDisplay*)display;
+    xcb_pixmap_t pixmap = xcb_generate_id(f->xcbconn);
+    xcb_create_pixmap(f->xcbconn, depth, pixmap, d, width, height);
+    //xcb_flush(f->xcbconn);
+    return pixmap;
+}
+
+int XFreePixmap_custom(Display* display, Pixmap pixmap)
+{
+    PM();
+    FakeDisplay* f = (FakeDisplay*)display;
+    xcb_free_pixmap(f->xcbconn, pixmap);
+    return 1;
+}
+
+int XFreeGC_custom(Display* display, GC gc)
+{
+    PM();
+    FakeDisplay* f = (FakeDisplay*)display;
+    xcb_free_gc(f->xcbconn, *((xcb_gcontext_t*)gc));
+    free(gc);
+    return 1;
+}
+
+GC XCreateGC_custom(Display* display, Drawable d, unsigned long valuemask, XGCValues* values)
+{
+    PM();
+    FakeDisplay* f = (FakeDisplay*)display;
+    xcb_gcontext_t gc = xcb_generate_id(f->xcbconn);
+    xcb_create_gc(f->xcbconn, gc, d, valuemask, values);
+    // malloc it because the compiler won't stop with the warnings if we try to cast xcb_gcontext_t to GC (a pointer)
+    xcb_gcontext_t* ptr = malloc(sizeof(xcb_gcontext_t));
+    *ptr = gc;
+    // Make sure xcb_gcontext_t fits in whatever GC is
+    //static_assert(sizeof(GC) >= sizeof(xcb_gcontext_t));
+    return (GC)ptr;
+}
+
+int XFillRectangle_custom(Display* display, Drawable d, GC gc, int x, int y, unsigned int width, unsigned int height)
+{
+    PM();
+    FakeDisplay* f = (FakeDisplay*)display;
+    xcb_rectangle_t rect = {x, y, width, height};
+    xcb_poly_rectangle(f->xcbconn, d, *((xcb_gcontext_t*)gc), 1, &rect);
+
+    xcb_flush(f->xcbconn);
+    return 1;
+}
+
+// Untested
+Bool XQueryExtension_custom(Display* display, _Xconst char* name, int* major_opcode_return, int* first_event_return, int* first_error_return)
+{
+    PM();
+    FakeDisplay* f = (FakeDisplay*)display;
+
+    xcb_query_extension_reply_t* reply = xcb_query_extension_reply(f->xcbconn, xcb_query_extension(f->xcbconn, strlen(name), name), NULL);
+    if(!reply)
+        return 0;
+
+    uint8_t present = reply->present;
+    *major_opcode_return = reply->major_opcode;
+    *first_event_return = reply->first_event;
+    *first_error_return = reply->first_error;
+
+    // Cache the xinput opcode for further use
+    if(!xinput_opcode && name && present && !strcmp(name, "XInputExtension"))
+        xinput_opcode = reply->major_opcode;
+
+    free(reply);
+
+    return present;
+}
+
+int XSync_custom(Display* display, Bool discard)
+{
+    PM();
+    FakeDisplay* f = (FakeDisplay*)display;
+    // Equivalent of xcb_aux_sync();
+    free(xcb_get_input_focus_reply(f->xcbconn, xcb_get_input_focus(f->xcbconn), NULL));
+    // I think this is the correct order...
+    if(discard)
+    {
+        // Since we are stubbing xcb_poll_for_queued_event, get the handle to the real one first and call that
+        xcb_generic_event_t* (*xcb_poll_for_queued_event_real)(xcb_connection_t* conn) = dlsym_real(xcb_handle, "xcb_poll_for_queued_event");
+        // Then drain the queue
+        xcb_generic_event_t* e;
+        while((e = xcb_poll_for_queued_event_real(f->xcbconn)))
+            free(e);
+    }
+    return 1;
+}
+
+int XWarpPointer_custom(Display* display, Window src_w, Window dest_w, int src_x, int src_y, unsigned int src_width, unsigned int src_height, int dest_x, int dest_y)
+{
+    PM();
+    FakeDisplay* f = (FakeDisplay*)display;
+
+    xcb_warp_pointer(f->xcbconn, src_w, dest_w, src_x, src_y, src_width, src_height, dest_x, dest_y);
+    // FIXME: flush?
+    return 1;
+}
+
+Bool XGetEventData_custom(Display* display, XGenericEventCookie* cookie)
+{
+    cookie->data = calloc(1, 1234); // FIXME
+    return False;
+}
+
+void XFreeEventData_custom(Display* display, XGenericEventCookie* cookie)
+{
+    free(cookie->data);
 }
