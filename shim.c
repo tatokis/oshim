@@ -30,8 +30,7 @@ void* (*dlsym_real)(void* handle, const char* symbol) = NULL;
 static void* (*dlsym_steam)(void* handle, const char* symbol) = NULL;
 void* xcb_handle = NULL;
 static void* libc_handle = NULL;
-//static void* xlib_handle = NULL;
-
+extern void* xlib_handle;
 
 // From XCB
 // Maaaybe rewrite
@@ -148,15 +147,26 @@ void* dlsym(void* handle, const char* symbol)
         // All X functions
         if(*symbol == 'X')
         {
-            char customsymbol[256];
-            snprintf(customsymbol, sizeof(customsymbol), "%s_custom", symbol);
-            retptr = dlsym_real(RTLD_DEFAULT, customsymbol);
-            printf("Asked real (fakeX) dlsym for %-35s, found at %p\n", customsymbol, retptr);
-            // If we couldn't find it, fall back to the real one with a big warning
-            if(!retptr)
+            // Some Xlib functions we do not have to implement, so just pass them through
+            // Eventually, this should be the default behaviour
+            /*if(!strcmp(symbol, "XEventsQueued") || !strcmp(symbol, "XPutBackEvent") || !strcmp(symbol, "XSelectInput"))
             {
-                retptr = catchall_fn;
-                printf("WARNING! Could not find fakeX %s, falling back to catchall_fn at %p\n", customsymbol, retptr);
+                //xlib_setup_reentrant();
+                retptr = dlsym_real(xlib_handle, symbol);
+                printf("OVERRIDE   (XLib)  dlsym for %-35s, found at %p\n", symbol, retptr);
+            }
+            else*/
+            {
+                char customsymbol[256];
+                snprintf(customsymbol, sizeof(customsymbol), "%s_custom", symbol);
+                retptr = dlsym_real(RTLD_DEFAULT, customsymbol);
+                printf("Asked real (fakeX) dlsym for %-35s, found at %p\n", customsymbol, retptr);
+                // If we couldn't find it, fall back to the real one with a big warning
+                if(!retptr)
+                {
+                    retptr = catchall_fn;
+                    printf("WARNING! Could not find fakeX %s, falling back to catchall_fn at %p\n", customsymbol, retptr);
+                }
             }
         }
         else
@@ -167,8 +177,10 @@ void* dlsym(void* handle, const char* symbol)
             retptr = dlsym_real(libc_handle, symbol);
             printf("Asked real (libc)  dlsym for %-35s, found at %p\n", symbol, retptr);
         }
-        if(!retptr)
-            puts("Incoming segfault. Couldn't find requested symbol");
+        if(!retptr){
+            puts("Couldn't find requested symbol. Aborting.");
+            abort();
+        }
     }
     else
     {
@@ -177,6 +189,11 @@ void* dlsym(void* handle, const char* symbol)
     }
     return retptr;
 }
+
+//
+// WARNING!
+// All xcb_-* functions must have XLIBGUARD in them somewhere to handle Xlib calling xcb functions and expecting actual answers
+//
 
 // Used for init
 xcb_connection_t* xcb_connect(const char* displayname, int* screenp)
@@ -203,6 +220,8 @@ xcb_connection_t* xcb_connect(const char* displayname, int* screenp)
 
     // We do this unconditionally because most applications call XOpenDisplay themselves (which internally calls xcb_connect) and then get the XCB pointer from Xlib
     FakeDisplay* f = add_to_fakedps(calloc(1, sizeof(FakeDisplay)));
+    f->magic1 = MAGIC1;
+    f->magic2 = MAGIC2;
     f->xcbconn = conn;
     f->xcbsyms = xcb_key_symbols_alloc(conn);
     // FIXME: Fill in default_screen in _XDisplay. Steam seems to use it as we get garbage in an Xlib call otherwise
@@ -351,13 +370,29 @@ xcb_generic_event_t* xcb_wait_for_event(xcb_connection_t* c)
 xcb_generic_event_t* xcb_poll_for_queued_event(xcb_connection_t* c)
 {
     PM();
-    return NULL;
+    XLIBGUARD
+    {
+        return NULL;
+    }
+    else
+    {
+        xcb_generic_event_t* (*xcb_poll_for_queued_event_real)(xcb_connection_t* c) = dlsym_real(xcb_handle, "xcb_poll_for_queued_event");
+        return xcb_poll_for_queued_event_real(c);
+    }
 }
 
 // We can use the fd here
 xcb_generic_event_t* xcb_poll_for_event(xcb_connection_t* c)
 {
     PM();
-    puts("STUB");
-    return NULL;
+    XLIBGUARD
+    {
+        puts("STUB");
+        return NULL;
+    }
+    else
+    {
+        xcb_generic_event_t* (*xcb_poll_for_event_real)(xcb_connection_t* c) = dlsym_real(xcb_handle, "xcb_poll_for_event");
+        return xcb_poll_for_event_real(c);
+    }
 }
