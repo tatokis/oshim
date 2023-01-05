@@ -1,0 +1,11 @@
+WARNING: This is awful and extremely hacky code. Expect a lot of crashes and unimplemented functions.
+
+Oshim is a shim library with the intention of enabling the steam overlay in applications that use pure XCB.
+
+It works by being placed inbetween the application and libxcb, and translating libxcb calls to their libX11 equivalents.
+These Xlib functions are then called with the appropriate arguments so that the steam overlay injects itself, and then caught on the other side with mostly stub implementations that send back data from XCB as necessary.
+
+Currently the Qt gtk2 QPA platform theme doesn't work and leads to crashes as it uses Xlib.
+
+Usage:
+QT_QPA_PLATFORMTHEME=qt5ct LD_PRELOAD=/path/to/liboshim.so:/path/to/.steam/ubuntu12_64/gameoverlayrenderer.so /usr/lib/x86_64-linux-gnu/qt5/examples/vulkan/hellovulkantexture/hellovulkantexture
